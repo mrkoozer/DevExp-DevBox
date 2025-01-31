@@ -1,0 +1,93 @@
+name: Deploy DevBox Workload to Azure
+
+trigger:
+- main
+
+parameters:
+  - name: workloadName
+    type: string
+    default: 'Contoso'
+    displayName: 'Name of the workload'
+    values:
+      - Contoso
+      - OtherWorkload
+  - name: location
+    type: string
+    default: 'eastus2'
+    displayName: 'Location of the Azure resources'
+
+variables:
+  devBoxResourceGroupName: '${{ parameters.workloadName }}-DevExp-RG'
+  connectivityResourceGroupName: '${{ parameters.workloadName }}-DevExp-Connectivity-RG'
+
+stages:
+- stage: Build
+  displayName: 'Build Workload Resources'
+  jobs:
+  - job: Build
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - script: |
+        sudo apt-get update && \
+        sudo az bicep upgrade
+      displayName: 'Update Packages and Upgrade Bicep'
+
+    - checkout: self
+      displayName: 'Checkout repository'
+
+    - script: |
+        az bicep build --file ./deploy/deploy.bicep --outfile ./bicepArtifacts/deploy.json
+        az bicep build-params --file ./deploy/params.bicepparam --outfile ./bicepArtifacts/deploy-params.json
+      displayName: 'Build Dev Box Bicep files'
+
+    - script: |
+        zip -r bicepArtifacts_v1.0.0-deploy-$(Build.BuildId).zip ./bicepArtifacts
+      displayName: 'Compress Bicep Artifacts'
+
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: 'bicepArtifacts_v1.0.0-deploy-$(Build.BuildId).zip'
+        ArtifactName: 'bicepArtifacts'
+        publishLocation: 'Container'
+
+- stage: Deploy
+  displayName: 'Deploy Dev Box Resources to Azure'
+  dependsOn: Build
+  jobs:
+  - job: Deploy
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - script: |
+        sudo apt-get update && \
+        sudo az bicep upgrade
+      displayName: 'Update Packages and Upgrade Bicep'
+
+    - checkout: self
+      displayName: 'Checkout repository'
+
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'YourAzureSubscription'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          chmod +x ./.configuration/bash/deployResourcesOrganization.sh
+          ./.configuration/bash/deployResourcesOrganization.sh ${{ variables.devBoxResourceGroupName }} ${{ variables.connectivityResourceGroupName }} ${{ parameters.location }}
+      displayName: 'Deploy Landing Zone Resources'
+
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'YourAzureSubscription'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az deployment group create \
+            --resource-group ${{ variables.devBoxResourceGroupName }} \
+            --template-file ./deploy/deploy.bicep \
+            --parameters ./deploy/params.bicepparam \
+            --parameters workloadName=${{ parameters.workloadName }} \
+            rgConnectivityName=${{ variables.connectivityResourceGroupName }} \
+            --mode Incremental
+      displayName: 'Deploy Dev Box DevCenter Resources'
